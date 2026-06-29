@@ -1,0 +1,4 @@
+(executable
+ (name main)
+ (public_name opam-minver)
+ (libraries opam_minver cmdliner logs logs.fmt unix))

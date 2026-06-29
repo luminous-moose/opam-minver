@@ -1,0 +1,60 @@
+(library
+ (name test_manifest_parse)
+ (modules test_manifest_parse)
+ (libraries opam_minver base opam-file-format)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))
+
+(library
+ (name test_manifest)
+ (modules test_manifest)
+ (libraries opam_minver base)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))
+
+(library
+ (name test_runner)
+ (modules test_runner)
+ (libraries opam_minver base)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))
+
+(library
+ (name test_version)
+ (modules test_version)
+ (libraries opam_minver base)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))
+
+(executable
+ (name big_output)
+ (modules big_output))
+
+(library
+ (name test_process)
+ (modules test_process)
+ (libraries opam_minver base)
+ (inline_tests
+  (deps big_output.exe))
+ (preprocess (pps ppx_inline_test ppx_expect)))
+
+(library
+ (name test_integration)
+ (modules test_integration)
+ (libraries opam_minver base unix)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))
+
+(library
+ (name test_dune_project)
+ (modules test_dune_project)
+ (libraries opam_minver base unix)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))
+
+(library
+ (name test_opam_build)
+ (modules test_opam_build)
+ (libraries opam_minver base unix)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))

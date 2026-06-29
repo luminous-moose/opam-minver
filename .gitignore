@@ -1,0 +1,9 @@
+_build/
+*.install
+.merlin
+*.byte
+*.native
+*.cmi
+*.cmx
+*.o
+.vscode/

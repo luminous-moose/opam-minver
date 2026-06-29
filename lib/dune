@@ -1,0 +1,4 @@
+(library
+ (name opam_minver)
+ (libraries opam-core opam-format unix logs parsexp sexplib0)
+ (flags :standard))
