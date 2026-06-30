@@ -419,3 +419,52 @@ let%expect_test "binary_search trace" =
     result: 3.0.0
     tested (in order): [3.0.0; 1.0.0; 2.0.0]
     |}]
+
+let mk_trace_test vs_strs bool_arr =
+  let vs = Array.of_list (List.map Version.of_string vs_strs) in
+  let map = Array.make (Array.length vs) `Unknown in
+  let tested = ref [] in
+  let test v =
+    let s = Version.to_string v in
+    tested := s :: !tested;
+    let idx = ref 0 in
+    Array.iteri (fun i u -> if Version.to_string u = s then idx := i) vs;
+    bool_arr.(!idx)
+  in
+  let result =
+    Probe.binary_search vs map 0 (Array.length vs - 1) test
+    |> Option.map Version.to_string
+  in
+  (result, List.rev !tested)
+
+let%expect_test "binary_search trace: unconstrained, floor at index 1" =
+  (* Five versions; 1.0.0 fails, rest pass.  Probes: mid=2 (1.2.0 passes),
+     then left to mid=0 (1.0.0 fails), then mid=1 (1.1.0 passes). *)
+  let result, tested =
+    mk_trace_test
+      [ "1.0.0"; "1.1.0"; "1.2.0"; "1.3.0"; "1.4.0" ]
+      [| false; true; true; true; true |]
+  in
+  Printf.printf "result: %s\n" (Option.value result ~default:"none");
+  Printf.printf "tested: [%s]\n" (String.concat "; " tested);
+  [%expect {|
+    result: 1.1.0
+    tested: [1.2.0; 1.0.0; 1.1.0]
+    |}]
+
+let%expect_test "binary_search trace: all pass, list starts at bound version" =
+  (* Simulates what test_dep receives after filter_dep_versions(At_least "1.1.0"):
+     [1.1.0; 1.2.0; 1.3.0; 1.4.0].  Without the optimization binary_search starts
+     at mid=1 (1.2.0), not at index 0 (the bound version 1.1.0).  After the
+     optimization, test_dep probes 1.1.0 first and skips binary_search entirely. *)
+  let result, tested =
+    mk_trace_test
+      [ "1.1.0"; "1.2.0"; "1.3.0"; "1.4.0" ]
+      [| true; true; true; true |]
+  in
+  Printf.printf "result: %s\n" (Option.value result ~default:"none");
+  Printf.printf "tested: [%s]\n" (String.concat "; " tested);
+  [%expect {|
+    result: 1.1.0
+    tested: [1.2.0; 1.1.0]
+    |}]

@@ -176,7 +176,7 @@ let delete_term = Term.(const cmd_delete $ dry_run_flag)
 
 let run_info =
   Cmd.info "opam-minver"
-    ~doc:"find minimum dependency versions for an opam project" ~version:"0.1.0"
+    ~doc:"find minimum dependency versions for an opam project" ~version:"0.1.1"
     ~man:
       [
         `S Manpage.s_description;
@@ -188,10 +188,11 @@ let run_info =
            the search begins: if it does not, the run aborts.";
         `P
           "Any existing dependency version bounds in the .opam file are used \
-           as limits to the search space. This can save time if you know of \
-           incompatibilities, but it also means that if you don't, you should \
-           probably remove any bounds you aren't certain of and let the tool \
-           discover them.";
+           as limits to the search space, and the lower bound version is \
+           probed first: if it passes, the binary search for that dependency \
+           is skipped entirely. Runs over a well-bounded file are therefore \
+           significantly faster. If you have bounds you are not certain of, \
+           remove them and let the tool discover them from scratch.";
         `P
           "By default the tool runs in dry-run mode and prints what it would \
            write. Pass $(b,--write) to update the .opam file in place.";

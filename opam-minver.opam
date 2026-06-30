@@ -1,5 +1,5 @@
 opam-version: "2.0"
-version: "0.1.0"
+version: "0.1.1"
 synopsis: "Find minimum dependency versions for an opam project"
 description: """
 opam-minver reads a project's .opam file to enumerate its dependencies,
@@ -32,5 +32,4 @@ depends: [
 build: [
   ["dune" "build" "-p" name "-j" jobs]
 ]
-
 

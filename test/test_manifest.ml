@@ -236,6 +236,20 @@ let file_lines path =
   close_in ic;
   Array.of_list (List.rev !lines)
 
+let%test "write_out does not produce trailing double newline" =
+  with_opam_file {|  "dune" {>= "3.0"}|} @@ fun path ->
+  match read path with
+  | Error _ -> false
+  | Ok t -> (
+      match write_out t (deps t) with
+      | Error _ -> false
+      | Ok () ->
+          let ic = open_in path in
+          let content = In_channel.input_all ic in
+          close_in ic;
+          let n = String.length content in
+          not (n >= 2 && String.sub content (n - 2) 2 = "\n\n"))
+
 let%test "unrecognised top-level entry returns error" =
   with_opam_file {|  foo|} @@ fun path ->
   match read path with Error _ -> true | Ok _ -> false

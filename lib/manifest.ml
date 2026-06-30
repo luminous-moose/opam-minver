@@ -183,11 +183,8 @@ let write_out t deps =
       Out_channel.with_open_gen [ Open_wronly; Open_creat; Open_excl ]
         0o644 temppath (fun oc ->
           created := true;
-          List.iter
-            (fun line ->
-              Out_channel.output_string oc line;
-              Out_channel.output_char oc '\n')
-            outlines);
+          let output = String.concat "\n" outlines in
+          Out_channel.output_string oc output);
       Unix.rename temppath t.path;
       Ok ()
     with

@@ -5,6 +5,8 @@ type probe_env = {
   dep_versions : string -> (Opam_versions.version_type, string) result;
   remove_all_pins : string -> (unit, string) result;
   run_combined_validation :
+    ?note:string ->
+    ?on_fail:string ->
     package:string ->
     dir:string ->
     verbose:bool ->

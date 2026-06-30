@@ -58,3 +58,10 @@
  (libraries opam_minver base unix)
  (inline_tests)
  (preprocess (pps ppx_inline_test ppx_expect)))
+
+(library
+ (name test_state)
+ (modules test_state)
+ (libraries opam_minver base unix)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_expect)))

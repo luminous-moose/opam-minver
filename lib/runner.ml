@@ -7,6 +7,8 @@ type probe_env = {
   dep_versions : string -> (Opam_versions.version_type, string) result;
   remove_all_pins : string -> (unit, string) result;
   run_combined_validation :
+    ?note:string ->
+    ?on_fail:string ->
     package:string ->
     dir:string ->
     verbose:bool ->
@@ -96,6 +98,19 @@ let probe_ocaml_versions env ctx ocamldep =
       let ocaml4_arr = Array.of_list ocaml4 in
       let ocaml5_arr = Array.of_list ocaml5 in
 
+      let has_lower_ocaml_bound ocamlv =
+        match ocamldep with
+        | None -> false
+        | Some dep -> (
+            let sb =
+              match dep.Manifest.bound with
+              | Simple s -> s
+              | Ocaml_split { ocaml4; ocaml5 } -> (
+                  match ocamlv with `Ocaml4 -> ocaml4 | `Ocaml5 -> ocaml5)
+              | Skip _ -> Unconstrained
+            in
+            match sb with At_least _ | Bounded _ -> true | _ -> false)
+      in
       let ocaml4_min_and_max_tested =
         if Array.length ocaml4_arr = 0 then None
         else begin
@@ -104,7 +119,9 @@ let probe_ocaml_versions env ctx ocamldep =
               (if Array.length ocaml4_arr = 1 then "" else "s")
               (Array.to_list ocaml4_arr |> List.map Version.to_string
              |> String.concat ", ");
-          Probe.test_ocaml4 ctx ocaml4_arr
+          Probe.test_ocaml4 ctx
+            ~probe_lower_bound:(has_lower_ocaml_bound `Ocaml4)
+            ocaml4_arr
         end
       in
       let ocaml5_min_and_max_tested =
@@ -115,7 +132,9 @@ let probe_ocaml_versions env ctx ocamldep =
               (if Array.length ocaml5_arr = 1 then "" else "s")
               (Array.to_list ocaml5_arr |> List.map Version.to_string
              |> String.concat ", ");
-          Probe.test_compiler ctx ocaml5_arr
+          Probe.test_compiler ctx
+            ~probe_lower_bound:(has_lower_ocaml_bound `Ocaml5)
+            ocaml5_arr
         end
       in
       match (ocaml4_min_and_max_tested, ocaml5_min_and_max_tested) with
@@ -232,10 +251,15 @@ let build_and_test ~switch ~dir ~package =
 (* Pin all deps to their discovered minimums in [switch] and run a combined
    build+test. Returns Ok () regardless of build outcome; failures are printed
    as warnings so the caller still gets to write the bounds it found. *)
-let validate_combined ~package ~dir ~verbose ocamlv ocaml_min dep_results =
+let validate_combined ?(note = "") ?(on_fail = "") ~package ~dir ~verbose ocamlv
+    ocaml_min dep_results =
   let suffix = match ocamlv with `Ocaml4 -> "ocaml4" | `Ocaml5 -> "ocaml5" in
   let switch = Opam_switch.prefix ^ "combined-" ^ suffix in
   let major = Version.major ocaml_min in
+  let label =
+    if note = "" then sprintf "Combined validation (OCaml %d)" major
+    else sprintf "Combined validation (OCaml %d, %s)" major note
+  in
   let pins =
     List.filter_map
       (fun (dep, version) ->
@@ -245,7 +269,7 @@ let validate_combined ~package ~dir ~verbose ocamlv ocaml_min dep_results =
       dep_results
   in
   if verbose then begin
-    printf "Combined validation (OCaml %d):\n%!" major;
+    printf "%s:\n%!" label;
     List.iter (fun (n, v) -> printf "  pinning %s = %s\n%!" n v) pins
   end;
   let result =
@@ -263,8 +287,10 @@ let validate_combined ~package ~dir ~verbose ocamlv ocaml_min dep_results =
     build_and_test ~switch ~dir ~package
   in
   (match result with
-  | Ok () -> printf "Combined validation (OCaml %d): PASS\n%!" major
-  | Error msg -> printf "Combined validation (OCaml %d): FAIL: %s\n%!" major msg);
+  | Ok () -> printf "%s: PASS\n%!" label
+  | Error msg ->
+      printf "%s: FAIL: %s\n%!" label msg;
+      if on_fail <> "" then printf "%s\n%!" on_fail);
   Ok ()
 
 let dep_fingerprint dep_results =
@@ -293,6 +319,44 @@ let maybe_validate_combined env state ~package ~dir ~verbose ocamlv
             dep_results
         in
         State.record_combined state ocaml_key fingerprint;
+        Ok ()
+      end
+  | _ -> Ok ()
+
+let maybe_validate_collapse env state ~package ~dir ~verbose o4_dep_results
+    o5_dep_results o4_ocaml_min_and_test =
+  let non_ocaml_fp deps =
+    deps
+    |> List.filter (fun (dep, _) -> dep.Manifest.name <> "ocaml")
+    |> dep_fingerprint
+  in
+  match (o4_dep_results, o5_dep_results, o4_ocaml_min_and_test) with
+  | Some o4_deps, Some o5_deps, Some (o4_min, _)
+    when not (String.equal (non_ocaml_fp o4_deps) (non_ocaml_fp o5_deps)) ->
+      let fingerprint = dep_fingerprint o5_deps in
+      if State.combined_done state "ocaml4-collapse" fingerprint then begin
+        printf
+          "Combined validation (OCaml 4, collapsed bounds): already done, \
+           skipping.\n\
+           %!";
+        Ok ()
+      end
+      else begin
+        let* () =
+          env.run_combined_validation ~note:"collapsed bounds"
+            ~on_fail:
+              "Warning: the bounds written to the .opam file (the higher OCaml \
+               5 minimums) cannot\n\
+               be satisfied on OCaml 4. Publishing with these bounds may make \
+               the package\n\
+               uninstallable on OCaml 4. Check which deps have split minimums \
+               (listed above\n\
+               as 'Note: different minimum versions found...') and whether \
+               their OCaml 5\n\
+               minimum versions are available for OCaml 4."
+            ~package ~dir ~verbose `Ocaml4 o4_min o5_deps
+        in
+        State.record_combined state "ocaml4-collapse" fingerprint;
         Ok ()
       end
   | _ -> Ok ()
@@ -348,6 +412,10 @@ let compute_bounds env state dir ~verbose ~package (deps : Manifest.dep list) =
   let* () =
     maybe_validate_combined env state ~package ~dir ~verbose `Ocaml5
       ocaml_result.ocaml5_min_and_test o5_dep_results
+  in
+  let* () =
+    maybe_validate_collapse env state ~package ~dir ~verbose o4_dep_results
+      o5_dep_results ocaml_result.ocaml4_min_and_test
   in
   Ok (merge_results deps o4_dep_results o5_dep_results)
 

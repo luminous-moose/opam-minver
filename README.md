@@ -64,15 +64,28 @@ search. `--dry-run` shows what would be removed without actually deleting.
 
 1. **Parse** the `.opam` file to collect all declared dependencies.
 2. **Probe the OCaml compiler** first. The current compiler is verified to
-   build and test the project; then the full range of available OCaml versions
-   is binary-searched for the oldest passing version. OCaml 4 and OCaml 5
+   build and test the project, then the available OCaml versions are
+   binary-searched for the oldest passing version. OCaml 4 and OCaml 5
    are searched independently, since a package can have different minimum
-   requirements for each major version.
+   requirements for each major version. If an OCaml lower bound already
+   exists in the `.opam` file, the bound version is probed first within each
+   series; if it passes, the binary search for that series is skipped entirely.
 3. **Probe each dependency** within a dedicated switch for each OCaml major
    version. All dependencies are tested in the same switch (with pins applied
    one at a time) rather than creating a new switch per version, which keeps
-   the search fast.
-4. **Write the results** back into the `.opam` file's `depends:` block once
+   the search fast. If a dependency already carries a lower bound in the
+   `.opam` file, that bound version is probed first; if it passes, the binary
+   search is skipped entirely, so runs over a well-bounded file are
+   significantly faster.
+4. **Run combined validations.** Once all per-dependency searches converge,
+   the discovered minimums are pinned together in a fresh switch and the
+   project is built and tested again. This catches any interactions between
+   packages that the independent per-dep searches could not see. If the
+   minimum version for any dependency differs between OCaml 4 and OCaml 5, an
+   additional validation pins the higher minimums into the OCaml 4
+   switch to verify they can be installed there: a warning is printed if they
+   cannot.
+5. **Write the results** back into the `.opam` file's `depends:` block once
    all searches have converged. Each dependency gets a single `>= version`
    constraint. If the minimum version differs between OCaml 4 and OCaml 5,
    the higher of the two is used and a note is printed, as opam's dependency
@@ -100,9 +113,9 @@ minimum on OCaml 4 than on OCaml 5, only the OCaml 5 (higher) minimum is
 written. opam's `pkg:var` package-variable filters are not reliably evaluated
 during dependency solving, so per-major-version bounds cannot be expressed
 (opam lint error E29).
-The tool prints which packages were affected. OCaml 4 support is unaffected
-as long as the higher minimum is installable on OCaml 4, which is worth
-verifying before publishing.
+The tool prints which packages were affected and automatically checks whether
+the higher (OCaml 5) minimums can be installed on OCaml 4, warning if they
+cannot.
 
 **`with-doc` dependencies are not probed.** Only runtime and `with-test`
 dependencies are tested. `with-doc` lower bounds must be set manually.

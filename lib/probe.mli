@@ -23,11 +23,15 @@ val binary_search :
     failure does not poison the cache. *)
 val test_compiler_version : ?save_on_fail:bool -> ctx -> Version.t -> bool
 
-val test_compiler : ctx -> Version.t array -> (Version.t * Version.t) option
+val test_compiler :
+  ctx -> ?probe_lower_bound:bool -> Version.t array -> (Version.t * Version.t) option
 
 (** Like [test_compiler] but checks the highest version first; if that fails,
-    the whole OCaml 4 range is skipped without further probing. *)
-val test_ocaml4 : ctx -> Version.t array -> (Version.t * Version.t) option
+    the whole OCaml 4 range is skipped without further probing.
+    [probe_lower_bound] is forwarded to the inner minimum search but not the
+    initial highest-version check. *)
+val test_ocaml4 :
+  ctx -> ?probe_lower_bound:bool -> Version.t array -> (Version.t * Version.t) option
 
 (** [test_dep ctx ocamlv switch_version dep all_dep_versions]
     binary-searches [all_dep_versions] (filtered by the dep's bound) for the

@@ -15,6 +15,15 @@ let run_build_step result =
   | Error (Opam_build.Missing_libraries libs) -> raise (Missing_libraries libs)
   | Error (Opam_build.Build_failure msg) -> Error msg
 
+let test_cached versions_map i f =
+  match versions_map.(i) with
+  | `Pass -> true
+  | `Fail -> false
+  | `Unknown ->
+      let r = f () in
+      versions_map.(i) <- (if r then `Pass else `Fail);
+      r
+
 (* Do a binary search to find the lowest version in [lo..hi] for which test
    returns true, consulting and updating versions_map to avoid redundant calls.
    Most binary searches don't have such a map: the main uses of it here are
@@ -24,15 +33,7 @@ let rec binary_search versions versions_map lo hi test =
   if lo > hi then None
   else
     let mid = (lo + hi) / 2 in
-    let r =
-      match versions_map.(mid) with
-      | `Pass -> true
-      | `Fail -> false
-      | `Unknown ->
-          let r = test versions.(mid) in
-          versions_map.(mid) <- (if r then `Pass else `Fail);
-          r
-    in
+    let r = test_cached versions_map mid (fun () -> test versions.(mid)) in
     if r then
       match binary_search versions versions_map lo (mid - 1) test with
       | None -> Some versions.(mid)
@@ -93,36 +94,49 @@ let array_find_last_index f arr =
 let ( let>> ) = Option.bind
 
 (* Binary-search an array of compiler versions for the lowest that passes.
-   Return that value, as well as the maximum tested passing value. *)
-let test_compiler ctx (versions : Version.t array) =
+   Return that value, as well as the maximum tested passing value.
+   If [probe_lower_bound] is true and the array is non-empty, the first
+   element (the lower bound version) is probed first; if it passes, the
+   binary search is skipped entirely. *)
+let test_compiler ctx ?(probe_lower_bound = false) (versions : Version.t array)
+    =
+  let n = Array.length versions in
   let versions_map =
-    Array.init (Array.length versions) (fun i ->
+    Array.init n (fun i ->
         let version = versions.(i) in
         let version_string = Version.to_string version in
         State.lookup ctx.state ~dep:"ocaml" ~ocaml_version:None
           ~version:version_string)
   in
-  let min =
-    binary_search versions versions_map 0
-      (Array.length versions - 1)
-      (test_compiler_version ctx)
+  let find_min () =
+    let min =
+      binary_search versions versions_map 0 (n - 1) (test_compiler_version ctx)
+    in
+    let>> min = min in
+    let i =
+      array_find_last_index (function `Pass -> true | _ -> false) versions_map
+    in
+    Some (min, versions.(i))
   in
-  let>> min = min in
-  let i =
-    array_find_last_index (function `Pass -> true | _ -> false) versions_map
-  in
-  let max_tested = versions.(i) in
-  Some (min, max_tested)
+  if probe_lower_bound && n > 0 then
+    let passed =
+      test_cached versions_map 0 (fun () ->
+          test_compiler_version ctx versions.(0))
+    in
+    if passed then Some (versions.(0), versions.(0)) else find_min ()
+  else find_min ()
 
 (* A special path for OCaml 4 where it checks the highest version first. If
-   that fails, the entire OCaml 4 range is skipped without further probing. *)
-let test_ocaml4 ctx versions =
+   that fails, the entire OCaml 4 range is skipped without further probing.
+   [probe_lower_bound] is forwarded to the inner [test_compiler] call that
+   searches the remaining versions, but not to the initial max-version check. *)
+let test_ocaml4 ctx ?(probe_lower_bound = false) versions =
   let length = Array.length versions in
   let max_version = versions.(length - 1) in
   if test_compiler ctx [| max_version |] |> Option.is_none then None
   else
     let min_version =
-      test_compiler ctx (Array.sub versions 0 (length - 1))
+      test_compiler ctx ~probe_lower_bound (Array.sub versions 0 (length - 1))
       |> Option.fold ~none:max_version ~some:fst
     in
     Some (min_version, max_version)
@@ -200,12 +214,31 @@ let test_dep ctx ocamlv switch_version (dep : Manifest.dep) all_dep_versions =
   in
   let unpin_result = ref (Ok ()) in
   let result =
-    Fun.protect
-      (fun () ->
-        binary_search versions versions_map 0 (Array.length versions - 1) test)
-      ~finally:(fun () ->
-        if !pinned then
-          unpin_result := Opam_pin.remove ~switch ~package:dep.name)
+    if Array.length versions = 0 then None
+    else
+      Fun.protect
+        (fun () ->
+          match dep.bound with
+          (* If there is a lower bound, test the lower bound first: if it
+             passes, we skip the binary search and save much time. *)
+          | Simple (At_least _) | Simple (Bounded _) -> begin
+              let minversion = versions.(0) in
+              let passed =
+                test_cached versions_map 0 (fun () -> test minversion)
+              in
+              if passed then Some minversion
+              else
+                binary_search versions versions_map 0
+                  (Array.length versions - 1)
+                  test
+            end
+          | _ ->
+              binary_search versions versions_map 0
+                (Array.length versions - 1)
+                test)
+        ~finally:(fun () ->
+          if !pinned then
+            unpin_result := Opam_pin.remove ~switch ~package:dep.name)
   in
   match !unpin_result with
   | Error msg -> Error (sprintf "could not unpin %s: %s" dep.name msg)

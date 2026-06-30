@@ -18,7 +18,8 @@ let stub_env ~ocaml_vs ~current ~dep_vs =
         | Some vs -> Ok (Versions (List.map v vs))
         | None -> Error ("no versions for " ^ pkg));
     remove_all_pins = (fun _ -> Ok ());
-    run_combined_validation = (fun ~package:_ ~dir:_ ~verbose:_ _ _ _ -> Ok ());
+    run_combined_validation =
+      (fun ?note:_ ?on_fail:_ ~package:_ ~dir:_ ~verbose:_ _ _ _ -> Ok ());
   }
 
 let show_probe r =
@@ -244,6 +245,36 @@ let%expect_test "probe_ocaml_versions: ocamldep constraint filters search range"
     ocaml5: min=5.0.0 test=5.0.0
     |}]
 
+let%expect_test
+    "probe_ocaml_versions: At_least OCaml 5 bound, bound version passes, 1 \
+     OCaml 5 probe" =
+  (* At_least "5.1.0" filters out 4.x and 5.0.0, leaving ocaml5=[5.1.0;5.2.0;5.3.0].
+     The optimization probes 5.1.0 first (index 0); it passes, so binary_search
+     is skipped entirely.  5.2.0 is deliberately absent from State: if it were
+     probed, binary_search would call the real test function and the subprocess
+     would fail.  Without the optimization, binary_search would visit 5.2.0
+     first (mid=1) and then 5.1.0, requiring 5.2.0 to be in State as well. *)
+  let state = State.empty () in
+  State.record state ~dep:"ocaml" ~ocaml_version:None ~version:"5.3.0" `Pass;
+  State.record state ~dep:"ocaml" ~ocaml_version:None ~version:"5.1.0" `Pass;
+  let env =
+    stub_env
+      ~ocaml_vs:[ "4.14.0"; "5.0.0"; "5.1.0"; "5.2.0"; "5.3.0" ]
+      ~current:"5.3.0" ~dep_vs:[]
+  in
+  let ocamldep = Some (dep "ocaml" (Simple (At_least "5.1.0"))) in
+  (match
+     Runner.probe_ocaml_versions env
+       { Probe.state; dir = "."; package = "test-package"; verbose = false }
+       ocamldep
+   with
+  | Ok r -> show_probe r
+  | Error e -> Printf.printf "error: %s\n" e);
+  [%expect {|
+    ocaml4: none
+    ocaml5: min=5.1.0 test=5.1.0
+    |}]
+
 (* ------------------------------------------------------------------ *)
 (* probe_deps                                                          *)
 (* ------------------------------------------------------------------ *)
@@ -345,7 +376,7 @@ let%test "probe_deps: skip dep is not probed" =
           else Ok (Versions [ v "1.0.0" ]));
       remove_all_pins = (fun _ -> Ok ());
       run_combined_validation =
-        (fun ~package:_ ~dir:_ ~verbose:_ _ _ _ -> Ok ());
+        (fun ?note:_ ?on_fail:_ ~package:_ ~dir:_ ~verbose:_ _ _ _ -> Ok ());
     }
   in
   let deps =
@@ -379,7 +410,7 @@ let%test "probe_deps: with-doc dep is not probed" =
           else Ok (Versions [ v "1.0.0" ]));
       remove_all_pins = (fun _ -> Ok ());
       run_combined_validation =
-        (fun ~package:_ ~dir:_ ~verbose:_ _ _ _ -> Ok ());
+        (fun ?note:_ ?on_fail:_ ~package:_ ~dir:_ ~verbose:_ _ _ _ -> Ok ());
     }
   in
   let deps =
@@ -411,7 +442,7 @@ let%expect_test "probe_deps: base package is skipped with message" =
           else Ok (Opam_versions.Versions [ v "1.1.0" ]));
       remove_all_pins = (fun _ -> Ok ());
       run_combined_validation =
-        (fun ~package:_ ~dir:_ ~verbose:_ _ _ _ -> Ok ());
+        (fun ?note:_ ?on_fail:_ ~package:_ ~dir:_ ~verbose:_ _ _ _ -> Ok ());
     }
   in
   let deps =
@@ -430,15 +461,104 @@ let%expect_test "probe_deps: base package is skipped with message" =
   | Error e -> Printf.printf "error: %s\n" e);
   [%expect {| cmdliner: 1.1.0 |}]
 
+let%expect_test
+    "probe_deps: unconstrained, 5 versions, floor at index 1, 3 probes" =
+  (* No existing bound; binary_search visits mid=2 (1.2.0 passes), recurses
+     left to mid=0 (1.0.0 fails), then mid=1 (1.1.0 passes).  Versions 1.3.0
+     and 1.4.0 are never visited.  The optimization has no effect here since
+     the bound is Unconstrained. *)
+  let state = State.empty () in
+  State.record state ~dep:"foo" ~ocaml_version:(Some "ocaml4") ~version:"1.0.0"
+    `Fail;
+  State.record state ~dep:"foo" ~ocaml_version:(Some "ocaml4") ~version:"1.1.0"
+    `Pass;
+  State.record state ~dep:"foo" ~ocaml_version:(Some "ocaml4") ~version:"1.2.0"
+    `Pass;
+  let env =
+    stub_env ~ocaml_vs:[] ~current:"4.14.0"
+      ~dep_vs:[ ("foo", [ "1.0.0"; "1.1.0"; "1.2.0"; "1.3.0"; "1.4.0" ]) ]
+  in
+  let deps = [ dep "foo" (Simple Unconstrained) ] in
+  (match
+     Runner.probe_deps env
+       { Probe.state; dir = "."; package = "test-package"; verbose = false }
+       `Ocaml4 (v "4.14.0") deps
+   with
+  | Ok results ->
+      List.iter
+        (fun (d, ver) ->
+          Printf.printf "%s: %s\n" d.name (Version.to_string ver))
+        (List.rev results)
+  | Error e -> Printf.printf "error: %s\n" e);
+  [%expect {| foo: 1.1.0 |}]
+
+let%expect_test "probe_deps: At_least bound, bound version passes, 1 probe" =
+  (* filter_dep_versions(At_least "1.1.0") yields [1.1.0; 1.2.0; 1.3.0; 1.4.0].
+     The optimization probes 1.1.0 first (index 0); it passes, so binary_search
+     is skipped entirely.  Only 1.1.0 need be in State; 1.2.0–1.4.0 are never
+     visited.  Without the optimization, binary_search would visit 1.2.0 and
+     then 1.1.0 for 2 probes. *)
+  let state = State.empty () in
+  State.record state ~dep:"foo" ~ocaml_version:(Some "ocaml4") ~version:"1.1.0"
+    `Pass;
+  let env =
+    stub_env ~ocaml_vs:[] ~current:"4.14.0"
+      ~dep_vs:[ ("foo", [ "1.0.0"; "1.1.0"; "1.2.0"; "1.3.0"; "1.4.0" ]) ]
+  in
+  let deps = [ dep "foo" (Simple (At_least "1.1.0")) ] in
+  (match
+     Runner.probe_deps env
+       { Probe.state; dir = "."; package = "test-package"; verbose = false }
+       `Ocaml4 (v "4.14.0") deps
+   with
+  | Ok results ->
+      List.iter
+        (fun (d, ver) ->
+          Printf.printf "%s: %s\n" d.name (Version.to_string ver))
+        (List.rev results)
+  | Error e -> Printf.printf "error: %s\n" e);
+  [%expect {| foo: 1.1.0 |}]
+
+let%expect_test "probe_deps: At_least bound, bound version fails, 3 probes" =
+  (* filter_dep_versions(At_least "1.1.0") yields [1.1.0; 1.2.0; 1.3.0; 1.4.0].
+     The optimization probes 1.1.0 first (index 0); it fails, so binary_search
+     runs with versions_map.(0) already set to Fail.  binary_search then visits
+     mid=1 (1.2.0 fails) and mid=2 (1.3.0 passes) for 3 probes total.
+     Without the optimization, binary_search would skip 1.1.0 entirely and
+     visit only 1.2.0 and 1.3.0 for 2 probes. This case is expected to be
+     significantly less common than the case above. *)
+  let state = State.empty () in
+  State.record state ~dep:"foo" ~ocaml_version:(Some "ocaml4") ~version:"1.1.0"
+    `Fail;
+  State.record state ~dep:"foo" ~ocaml_version:(Some "ocaml4") ~version:"1.2.0"
+    `Fail;
+  State.record state ~dep:"foo" ~ocaml_version:(Some "ocaml4") ~version:"1.3.0"
+    `Pass;
+  let env =
+    stub_env ~ocaml_vs:[] ~current:"4.14.0"
+      ~dep_vs:[ ("foo", [ "1.0.0"; "1.1.0"; "1.2.0"; "1.3.0"; "1.4.0" ]) ]
+  in
+  let deps = [ dep "foo" (Simple (At_least "1.1.0")) ] in
+  (match
+     Runner.probe_deps env
+       { Probe.state; dir = "."; package = "test-package"; verbose = false }
+       `Ocaml4 (v "4.14.0") deps
+   with
+  | Ok results ->
+      List.iter
+        (fun (d, ver) ->
+          Printf.printf "%s: %s\n" d.name (Version.to_string ver))
+        (List.rev results)
+  | Error e -> Printf.printf "error: %s\n" e);
+  [%expect {| foo: 1.3.0 |}]
+
 let%expect_test "probe_deps: existing bound filters candidate versions" =
-  (* 1.0.0 is returned by dep_versions but excluded by the At_least "1.1.0"
-     bound before State lookup.  Not recording it in State means the test
-     would fail if it were ever probed. *)
+  (* 1.0.0 is excluded by filter_dep_versions(At_least "1.1.0") before State
+     lookup.  The optimization probes 1.1.0 first; since it passes, binary_search
+     is skipped entirely, so 1.2.0 is never visited and need not be in State. *)
   let state = State.empty () in
   State.record state ~dep:"cmdliner" ~ocaml_version:(Some "ocaml4")
     ~version:"1.1.0" `Pass;
-  State.record state ~dep:"cmdliner" ~ocaml_version:(Some "ocaml4")
-    ~version:"1.2.0" `Pass;
   let env =
     stub_env ~ocaml_vs:[] ~current:"4.14.0"
       ~dep_vs:[ ("cmdliner", [ "1.0.0"; "1.1.0"; "1.2.0" ]) ]
@@ -610,6 +730,129 @@ let%expect_test
     {|
     "ocaml" {>= "4.14.0" & < "5.0.0" | >= "5.1.0"}
     "pkg" {>= "1.2.0"}
+    |}]
+
+let%expect_test
+    "compute_bounds: collapse validation fires when dep versions split" =
+  let state = State.empty () in
+  State.record state ~dep:"ocaml" ~ocaml_version:None ~version:"4.14.0" `Pass;
+  State.record state ~dep:"ocaml" ~ocaml_version:None ~version:"5.0.0" `Pass;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml4") ~version:"1.0.0"
+    `Fail;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml4") ~version:"1.1.0"
+    `Pass;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml5") ~version:"1.0.0"
+    `Fail;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml5") ~version:"1.1.0"
+    `Fail;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml5") ~version:"1.2.0"
+    `Pass;
+  let calls = ref [] in
+  let env =
+    {
+      Runner.ocaml_versions = (fun () -> Ok (List.map v [ "4.14.0"; "5.0.0" ]));
+      current_ocaml = (fun () -> Ok (v "5.0.0"));
+      dep_versions =
+        (fun _ ->
+          Ok (Opam_versions.Versions (List.map v [ "1.0.0"; "1.1.0"; "1.2.0" ])));
+      remove_all_pins = (fun _ -> Ok ());
+      run_combined_validation =
+        (fun ?(note = "")
+          ?on_fail:_
+          ~package:_
+          ~dir:_
+          ~verbose:_
+          ocamlv
+          _ocaml_min
+          dep_results
+        ->
+          let major = match ocamlv with `Ocaml4 -> 4 | `Ocaml5 -> 5 in
+          let pins =
+            dep_results
+            |> List.filter_map (fun (dep, ver) ->
+                if dep.Manifest.name = "ocaml" then None
+                else Some (dep.Manifest.name ^ "=" ^ Version.to_string ver))
+            |> List.sort String.compare |> String.concat ","
+          in
+          let note_s = if note = "" then "" else " [" ^ note ^ "]" in
+          calls := Printf.sprintf "OCaml%d%s: %s" major note_s pins :: !calls;
+          Ok ());
+    }
+  in
+  let deps =
+    [ dep "ocaml" (Simple Unconstrained); dep "pkg" (Simple Unconstrained) ]
+  in
+  (match
+     Runner.compute_bounds env state "." ~verbose:false ~package:"test-package"
+       deps
+   with
+  | Ok _ -> ()
+  | Error e -> Printf.printf "error: %s\n" e);
+  List.iter print_endline (List.rev !calls);
+  [%expect
+    {|
+    OCaml4: pkg=1.1.0
+    OCaml5: pkg=1.2.0
+    OCaml4 [collapsed bounds]: pkg=1.2.0
+    |}]
+
+let%expect_test
+    "compute_bounds: collapse validation skipped when dep versions match" =
+  let state = State.empty () in
+  State.record state ~dep:"ocaml" ~ocaml_version:None ~version:"4.14.0" `Pass;
+  State.record state ~dep:"ocaml" ~ocaml_version:None ~version:"5.0.0" `Pass;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml4") ~version:"1.0.0"
+    `Fail;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml4") ~version:"1.1.0"
+    `Pass;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml5") ~version:"1.0.0"
+    `Fail;
+  State.record state ~dep:"pkg" ~ocaml_version:(Some "ocaml5") ~version:"1.1.0"
+    `Pass;
+  let calls = ref [] in
+  let env =
+    {
+      Runner.ocaml_versions = (fun () -> Ok (List.map v [ "4.14.0"; "5.0.0" ]));
+      current_ocaml = (fun () -> Ok (v "5.0.0"));
+      dep_versions =
+        (fun _ -> Ok (Opam_versions.Versions (List.map v [ "1.0.0"; "1.1.0" ])));
+      remove_all_pins = (fun _ -> Ok ());
+      run_combined_validation =
+        (fun ?(note = "")
+          ?on_fail:_
+          ~package:_
+          ~dir:_
+          ~verbose:_
+          ocamlv
+          _ocaml_min
+          dep_results
+        ->
+          let major = match ocamlv with `Ocaml4 -> 4 | `Ocaml5 -> 5 in
+          let pins =
+            dep_results
+            |> List.filter_map (fun (dep, ver) ->
+                if dep.Manifest.name = "ocaml" then None
+                else Some (dep.Manifest.name ^ "=" ^ Version.to_string ver))
+            |> List.sort String.compare |> String.concat ","
+          in
+          let note_s = if note = "" then "" else " [" ^ note ^ "]" in
+          calls := Printf.sprintf "OCaml%d%s: %s" major note_s pins :: !calls;
+          Ok ());
+    }
+  in
+  let deps =
+    [ dep "ocaml" (Simple Unconstrained); dep "pkg" (Simple Unconstrained) ]
+  in
+  (match
+     Runner.compute_bounds env state "." ~verbose:false ~package:"test-package"
+       deps
+   with
+  | Ok _ -> ()
+  | Error e -> Printf.printf "error: %s\n" e);
+  List.iter print_endline (List.rev !calls);
+  [%expect {|
+    OCaml4: pkg=1.1.0
+    OCaml5: pkg=1.1.0
     |}]
 
 (* ------------------------------------------------------------------ *)
